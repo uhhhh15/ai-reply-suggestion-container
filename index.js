@@ -12,6 +12,7 @@
         model: 'google/gemma-3-27b-it-fast',
         activePromptIndex: 0,
         displayMode: 'wrap',
+        sendMode: 'auto', // 新增：发送模式，'auto' 或 'manual'
         characterBindings: {},
         prompts: [
             {
@@ -24,7 +25,7 @@
 你的任务是根据最新的对话上下文，为“用户”生成三条简短、有效、符合其角色风格的回复建议。
 
 # 核心指令
-1.  分析下方提供的[AI的回复]和[用户的回复]，理解当前情境和用户的说话风格。
+1.  分析下方提供的[用户的回复]和[AI的回复]，理解当前情境和用户的说话风格。
 2.  从以下三个不同角度生成建议：
     - **一条行动建议**：促使角色做出具体动作，推动剧情。
     - **一条提问建议**：用于探索信息或试探对方。
@@ -57,7 +58,7 @@
 
     let settings = { ...DEFAULT_SETTINGS };
 
-    const SCRIPT_VERSION = '2.1.1';
+    const SCRIPT_VERSION = '2.2.0'; // 版本号更新
 
     async function markUpdateNoticeSeen() {
         if (settings.lastSeenScriptVersion !== SCRIPT_VERSION) {
@@ -89,6 +90,7 @@
             const globalVars = await TavernHelper.getVariables({ type: 'global' }) || {};
             const existingSettings = globalVars[SETTINGS_KEY];
             if (existingSettings && typeof existingSettings === 'object') {
+                // 【无缝迁移】: 通过扩展运算符，旧设置对象会自动获得新版DEFAULT_SETTINGS中的新增字段(如sendMode)
                 let mergedSettings = { ...DEFAULT_SETTINGS, ...existingSettings, prompts: existingSettings.prompts || DEFAULT_SETTINGS.prompts, characterBindings: existingSettings.characterBindings || DEFAULT_SETTINGS.characterBindings, };
                 settings = mergedSettings;
             } else {
@@ -113,7 +115,7 @@
         }
     }
     
-    // --- 核心逻辑 (无改动) ---
+    // --- 核心逻辑 ---
     function extractTextFromMessage(messageObj) { if (!messageObj || !messageObj.message) return ''; return parent$('<div>').html(messageObj.message.replace(/<br\s*\/?>/gi, '\n')).text().trim(); }
     async function callSuggestionAI(aiReply, userReply) {
         cleanupSuggestions();
@@ -157,7 +159,6 @@
         const $container = parent$(`<div id="${SUGGESTION_CONTAINER_ID}"></div>`);
         if (settings.displayMode === 'wrap') { $container.addClass('sg-mode-wrap'); } else { $container.addClass('sg-mode-scroll'); }
         suggestions.forEach(text => {
-            // 【修正】: 恢复为原始的按钮样式类
             const $capsule = parent$(`<button class="qr--button menu_button interactable suggestion-capsule">${text}</button>`);
             $capsule.on('click', function() { sendSuggestionText(text); cleanupSuggestions(); });
             $container.append($capsule);
@@ -166,7 +167,30 @@
         logMessage(`已在界面上渲染 ${suggestions.length} 条建议。`, 'success');
         if(typeof eventOnce !== 'undefined' && typeof tavern_events !== 'undefined'){ eventOnce( tavern_events.MESSAGE_SENT, cleanupSuggestions); eventOnce( tavern_events.MESSAGE_DELETED, cleanupSuggestions); eventOnce( tavern_events.MESSAGE_SWIPED, cleanupSuggestions); eventOnce( tavern_events.CHAT_CHANGED, cleanupSuggestions);}
     }
-    async function sendSuggestionText(text) { if (typeof TavernHelper === 'undefined' || typeof TavernHelper.triggerSlash !== 'function') { return; } const tempVarName = `suggestion_text_${Date.now()}`; const commandChain = `/setvar key=${tempVarName} ${JSON.stringify(text)} | /send {{getvar::${tempVarName}}} | /trigger | /flushvar ${tempVarName}`.trim().replace(/\s+/g, ' '); try { await TavernHelper.triggerSlash(commandChain); } catch (error) { logMessage(`执行命令链时出错: ${error.message}`, 'error'); } }
+    // 【修改】: 根据sendMode决定是发送还是填入输入框
+    async function sendSuggestionText(text) {
+        if (settings.sendMode === 'manual') {
+            // 手动模式：填入输入框
+            const $textarea = parent$('#send_textarea');
+            if ($textarea.length > 0) {
+                $textarea.val(text).trigger('input'); // 填充并触发input事件以更新UI
+                logMessage(`已将建议 “<b>${text}</b>” 填入输入框。`, 'success');
+            } else {
+                logMessage('未找到输入框 #send_textarea，填充失败。', 'error');
+            }
+        } else {
+            // 自动模式（默认）：使用triggerSlash发送
+            if (typeof TavernHelper === 'undefined' || typeof TavernHelper.triggerSlash !== 'function') { return; }
+            const tempVarName = `suggestion_text_${Date.now()}`;
+            const commandChain = `/setvar key=${tempVarName} ${JSON.stringify(text)} | /send {{getvar::${tempVarName}}} | /trigger | /flushvar ${tempVarName}`.trim().replace(/\s+/g, ' ');
+            try {
+                await TavernHelper.triggerSlash(commandChain);
+                logMessage(`已自动发送建议: "<b>${text}</b>"`, 'success');
+            } catch (error) {
+                logMessage(`执行自动发送命令链时出错: ${error.message}`, 'error');
+            }
+        }
+    }
     function cleanupSuggestions() { parent$(`#${SUGGESTION_CONTAINER_ID}`).remove(); }
     async function triggerSuggestionGeneration() {
         try {
@@ -336,8 +360,6 @@
             .prompt-item-name input { font-weight: 600; }
             .prompt-item-actions { display: flex; gap: 8px; }
             .prompt-content-textarea { border-top: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1)); border-radius: 0 0 10px 10px; border-width: 1px 0 0 0; }
-            
-            /* 【修正】面板内按钮样式 */
             .sg-button {
                 background: var(--SmartThemeQuoteColor, #4a9eff); color: var(--SmartThemeBodyColor, #ffffff);
                 padding: 6px 16px; border: none; border-radius: 8px; cursor: pointer;
@@ -352,76 +374,23 @@
             .prompt-item-actions .sg-button { padding: 5px 10px; font-size: 12px; }
 
             /* 日志面板 */
-            #${LOG_PANEL_ID} {
-                background-color: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.1));
-                font-family: monospace;
-                font-size: 13px;
-                color: var(--SmartThemeBodyColor, #e0e0e0);
-            }
-            /* 新增：让 .log-message 默认自适应主题色 */
-            #${LOG_PANEL_ID} .log-message {
-                color: var(--SmartThemeBodyColor, #e0e0e0);
-            }
-            .log-entry { 
-                margin-bottom: 8px; padding: 5px 10px; 
-                border-left: 3px solid var(--SmartThemeBorderColor, #444); 
-                border-radius: 4px; background: rgba(0,0,0,0.1);
-                /* 【修正】: 确保所有日志文本颜色都是自适应的 */
-                color: var(--SmartThemeBodyColor, #e0e0e0);
-            }
+            #${LOG_PANEL_ID} { background-color: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.1)); font-family: monospace; font-size: 13px; color: var(--SmartThemeBodyColor, #e0e0e0); }
+            #${LOG_PANEL_ID} .log-message { color: var(--SmartThemeBodyColor, #e0e0e0); }
+            .log-entry { margin-bottom: 8px; padding: 5px 10px; border-left: 3px solid var(--SmartThemeBorderColor, #444); border-radius: 4px; background: rgba(0,0,0,0.1); color: var(--SmartThemeBodyColor, #e0e0e0); }
             .log-entry.log-error { border-left-color: rgb(240, 75, 89); background: rgba(240, 75, 89, 0.1); }
             .log-entry.log-success { border-left-color: #28a745; background: rgba(40, 167, 69, 0.1); }
             .log-entry.log-warn { border-left-color: #ffc107; background: rgba(255, 193, 7, 0.1); }
-            #${LOG_PANEL_ID} .log-message b {
-                color: var(--SmartThemeQuoteColor, #00aaff);
-            }
-            /* 清除原来给所有 <pre> 强制的字体色 */
+            #${LOG_PANEL_ID} .log-message b { color: var(--SmartThemeQuoteColor, #00aaff); }
             #${LOG_PANEL_ID} .log-message pre { white-space: pre-wrap; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; margin-top: 5px; }
+            #${LOG_PANEL_ID} .log-message pre.ai-raw-return { color: var(--SmartThemeQuoteColor, #00aaff) !important; }
+            #${LOG_PANEL_ID} .log-message pre.final-prompt { color: var(--SmartThemeQuoteColor, #c8a2c8) !important; }
 
-            /* AI 原生返回：蓝色 */
-            #${LOG_PANEL_ID} .log-message pre.ai-raw-return {
-                color: var(--SmartThemeQuoteColor, #00aaff) !important;
-            }
-            /* 最终提示词：紫色 */
-            #${LOG_PANEL_ID} .log-message pre.final-prompt {
-                color: var(--SmartThemeQuoteColor, #c8a2c8) !important;
-            }
-
-            #${SUGGESTION_CONTAINER_ID} {
-                margin: 0;
-                padding: 5px 0;
-                width: 100%;
-                box-sizing: border-box;
-                display: flex;
-            }
-            #${SUGGESTION_CONTAINER_ID} .suggestion-capsule {
-                width: auto;
-                white-space: nowrap;
-                flex-shrink: 0;
-                margin: 0 !important;
-            }
-            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll {
-                justify-content: flex-start;
-                overflow-x: auto;
-                gap: 5px;
-                scrollbar-width: none;
-                -ms-overflow-style: none;
-            }
-            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::-webkit-scrollbar {
-                display: none;
-            }
-            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::before,
-            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::after {
-                content: '';
-                flex-grow: 1;
-            }
-            #${SUGGESTION_CONTAINER_ID}.sg-mode-wrap {
-                flex-wrap: wrap;
-                justify-content: center;
-                column-gap: 5px;
-                row-gap: 5px;
-            }
-            /* —— 以上块结束 —— */
+            #${SUGGESTION_CONTAINER_ID} { margin: 0; padding: 5px 0; width: 100%; box-sizing: border-box; display: flex; }
+            #${SUGGESTION_CONTAINER_ID} .suggestion-capsule { width: auto; white-space: nowrap; flex-shrink: 0; margin: 0 !important; }
+            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll { justify-content: flex-start; overflow-x: auto; gap: 5px; scrollbar-width: none; -ms-overflow-style: none; }
+            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::-webkit-scrollbar { display: none; }
+            #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::before, #${SUGGESTION_CONTAINER_ID}.sg-mode-scroll::after { content: ''; flex-grow: 1; }
+            #${SUGGESTION_CONTAINER_ID}.sg-mode-wrap { flex-wrap: wrap; justify-content: center; column-gap: 5px; row-gap: 5px; }
         </style>`;
         parent$(parentDoc.head).append(styles);
     }
@@ -431,10 +400,13 @@
             parent$('<div/>', { id: BUTTON_ID, class: 'list-group-item flex-container flexGap5 interactable', html: `<i class="fa-solid fa-lightbulb"></i><span>AI指引助手</span>` }).appendTo(parent$(`#extensionsMenu`));
         }
         if (parent$(`#${OVERLAY_ID}`).length === 0) {
+            // 【新增】: 创建发送模式的HTML
             const displayModeHtml = `<div class="form-group"><label for="sg-display-mode-select">显示模式:</label><select id="sg-display-mode-select" class="sg-select-box"><option value="scroll">模式A: 水平滚动</option><option value="wrap">模式B: 多行换行</option></select></div>`;
-            const helpContentHtml = `<div style="line-height: 1.6;"><h4>欢迎使用AI指引助手！</h4><p>本脚本会在AI角色回复后，自动调用您指定的AI模型，根据最新的对话上下文，生成若干条符合您角色风格的回复建议，并显示在输入框上方，供您快速选择。</p><hr><h5>核心功能</h5><p>每次AI完成生成后，插件会自动执行以下操作：</p><ul><li>获取最后两条消息（您的上一条回复和AI的最新回复）。</li><li>将这两条消息填入您在“预设”中设置的模板。</li><li>使用“API与显示”中配置的密钥、地址和模型，向AI服务商发起请求。</li><li>解析AI返回的内容，提取所有被 <code>【】</code> 符号包裹的文本作为建议。</li><li>将建议按钮显示在输入框上方。</li></ul><hr><h5>面板说明</h5><p><strong>1. API与显示</strong></p><ul><li><strong>API Key:</strong> 您的AI服务商提供的密钥，会以密码形式显示。</li><li><strong>Base URL:</strong> AI服务的API地址，例如 <code>https://api.openai.com/v1</code>。</li><li><strong>Model:</strong> 您希望用来生成建议的AI模型名称，例如 <code>gpt-4o-mini</code>。</li><li><strong>显示模式:</strong><ul><li><strong>模式A (水平滚动):</strong> 建议按钮会排成一行，如果超出宽度可以水平滚动。界面更紧凑。</li><li><strong>模式B (多行换行):</strong> 建议按钮会自动换行，适合建议较长或数量较多的情况。</li></ul></li></ul><p><strong>2. 预设</strong></p><ul><li><strong>列表:</strong> 您可以创建多个不同的预设提示词，用于不同的场景或角色。</li><li><strong>使用按钮:</strong> 点击后，会将当前预设与<strong>当前聊天角色</strong>进行绑定。下次切换回这个角色时，插件会自动激活这个预设。</li><li><strong>删除按钮:</strong> 删除预设。如果该预设是某个角色的绑定，该角色将恢复使用默认预设。</li><li><strong>添加新预设:</strong> 在列表底部创建一个新的空白预设。</li></ul><p><strong>3. 日志</strong></p><ul><li>这里会详细记录最新一次建议生成过程中的所有步骤、API请求、AI返回的原始数据以及解析结果。</li><li>如果插件没有按预期工作，请先检查此处的错误信息，特别是 <strong><span style="color: #ff6347;">[最终提示词]</span></strong> 和 <strong>[AI原始返回]</strong> 部分。</li></ul><hr><h5><span style="color: #ffc107;">【重要】如何编写有效的提示词</span></h5><p>为了让插件正确工作，您的提示词必须引导AI返回特定格式的文本。</p><ol><li><strong>必须包含占位符:</strong> 您的提示词中应包含<code>{{user_last_reply}}</code> 和 <code>{{ai_last_reply}}</code>，插件会自动用最新的对话内容替换它们，为AI提供上下文（注意：顺序是先用户后AI）。</li><li><strong>必须指定输出格式:</strong> 您必须在提示词中明确要求AI将每条建议都用全角方括号 <code>【】</code> 包裹起来，并且所有建议都在一行内输出，不要添加序号、换行或其他无关字符。</li></ol><p><strong>正确输出示例 (AI应返回这样的单行文本):</strong></p><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block;">【拔出我的长剑！】【它好像受伤了？】【先找地方躲起来！】</code><p><strong>错误输出示例:</strong></p><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block; margin-bottom: 5px;">1.【拔出我的长剑！】 2.【它好像受伤了？】</code><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block;">{"suggestions": ["拔出我的长剑！", "它好像受伤了？"]}</code><p>如果AI返回了错误格式，插件将无法解析出任何建议。请根据“日志”中的“AI原始返回”内容，调整您的提示词，直到AI能够稳定输出正确格式为止。</p></div>`;
+            const sendModeHtml = `<div class="form-group"><label for="sg-send-mode-select">发送模式:</label><select id="sg-send-mode-select" class="sg-select-box"><option value="auto">自动发送 (点击后直接发送)</option><option value="manual">手动发送 (点击后填入输入框)</option></select></div>`;
+            const helpContentHtml = `<div style="line-height: 1.6;"><h4>欢迎使用AI指引助手！</h4><p>本脚本会在AI角色回复后，自动调用您指定的AI模型，根据最新的对话上下文，生成若干条符合您角色风格的回复建议，并显示在输入框上方，供您快速选择。</p><hr><h5>核心功能</h5><p>每次AI完成生成后，插件会自动执行以下操作：</p><ul><li>获取最后两条消息（您的上一条回复和AI的最新回复）。</li><li>将这两条消息填入您在“预设”中设置的模板。</li><li>使用“API与显示”中配置的密钥、地址和模型，向AI服务商发起请求。</li><li>解析AI返回的内容，提取所有被 <code>【】</code> 符号包裹的文本作为建议。</li><li>将建议按钮显示在输入框上方。</li></ul><hr><h5>面板说明</h5><p><strong>1. API与显示</strong></p><ul><li><strong>API Key:</strong> 您的AI服务商提供的密钥，会以密码形式显示。</li><li><strong>Base URL:</strong> AI服务的API地址，例如 <code>https://api.openai.com/v1</code>。</li><li><strong>Model:</strong> 您希望用来生成建议的AI模型名称，例如 <code>gpt-4o-mini</code>。</li><li><strong>显示模式:</strong><ul><li><strong>模式A (水平滚动):</strong> 建议按钮会排成一行，如果超出宽度可以水平滚动。界面更紧凑。</li><li><strong>模式B (多行换行):</strong> 建议按钮会自动换行，适合建议较长或数量较多的情况。</li></ul></li><li><strong>发送模式:</strong><ul><li><strong>自动发送:</strong> 点击建议按钮后，内容会直接发送出去。</li><li><strong>手动发送:</strong> 点击建议按钮后，内容会填充到输入框，需要您手动点击发送。</li></ul></li></ul><p><strong>2. 预设</strong></p><ul><li><strong>列表:</strong> 您可以创建多个不同的预设提示词，用于不同的场景或角色。</li><li><strong>使用按钮:</strong> 点击后，会将当前预设与<strong>当前聊天角色</strong>进行绑定。下次切换回这个角色时，插件会自动激活这个预设。</li><li><strong>删除按钮:</strong> 删除预设。如果该预设是某个角色的绑定，该角色将恢复使用默认预设。</li><li><strong>添加新预设:</strong> 在列表底部创建一个新的空白预设。</li></ul><p><strong>3. 日志</strong></p><ul><li>这里会详细记录最新一次建议生成过程中的所有步骤、API请求、AI返回的原始数据以及解析结果。</li><li>如果插件没有按预期工作，请先检查此处的错误信息，特别是 <strong><span style="color: #ff6347;">[最终提示词]</span></strong> 和 <strong>[AI原始返回]</strong> 部分。</li></ul><hr><h5><span style="color: #ffc107;">【重要】如何编写有效的提示词</span></h5><p>为了让插件正确工作，您的提示词必须引导AI返回特定格式的文本。</p><ol><li><strong>必须包含占位符:</strong> 您的提示词中应包含<code>{{user_last_reply}}</code> 和 <code>{{ai_last_reply}}</code>，插件会自动用最新的对话内容替换它们，为AI提供上下文（注意：顺序是先用户后AI）。</li><li><strong>必须指定输出格式:</strong> 您必须在提示词中明确要求AI将每条建议都用全角方括号 <code>【】</code> 包裹起来，并且所有建议都在一行内输出，不要添加序号、换行或其他无关字符。</li></ol><p><strong>正确输出示例 (AI应返回这样的单行文本):</strong></p><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block;">【拔出我的长剑！】【它好像受伤了？】【先找地方躲起来！】</code><p><strong>错误输出示例:</strong></p><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block; margin-bottom: 5px;">1.【拔出我的长剑！】 2.【它好像受伤了？】</code><code style="background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); padding: 4px 8px; border-radius: 4px; display: block;">{"suggestions": ["拔出我的长剑！", "它好像受伤了？"]}</code><p>如果AI返回了错误格式，插件将无法解析出任何建议。请根据“日志”中的“AI原始返回”内容，调整您的提示词，直到AI能够稳定输出正确格式为止。</p></div>`;
             const $overlay = parent$('<div/>', { id: OVERLAY_ID });
-            const $panel = parent$(`<div id="${PANEL_ID}"><div class="panel-header"><h4>AI指引助手 - 设置</h4><button class="panel-close-btn">×</button></div><div class="panel-nav"><div class="panel-nav-item active" data-tab="api">API</div><div class="panel-nav-item" data-tab="prompts">预设</div><div class="panel-nav-item" data-tab="logs">日志</div><div class="panel-nav-item" data-tab="help">使用说明</div></div><div class="panel-content-wrapper"><div id="sg-panel-api" class="panel-content active"><div class="form-group"><label for="sg-api-key">API Key:</label><input type="password" id="sg-api-key"></div><div class="form-group"><label for="sg-base-url">Base URL:</label><input type="text" id="sg-base-url"></div><div class="form-group"><label for="sg-model">Model:</label><input type="text" id="sg-model"></div>${displayModeHtml}</div><div id="sg-panel-prompts" class="panel-content"><div id="sg-prompt-list"></div><button id="sg-add-prompt-btn" class="sg-button secondary" style="width:100%;">添加新预设</button></div><div id="${LOG_PANEL_ID}" class="panel-content" data-tab-name="logs"></div><div id="sg-panel-help" class="panel-content">${helpContentHtml}</div></div></div>`);
+            // 【修改】: 在API面板HTML中添加发送模式的HTML
+            const $panel = parent$(`<div id="${PANEL_ID}"><div class="panel-header"><h4>AI指引助手 - 设置</h4><button class="panel-close-btn">×</button></div><div class="panel-nav"><div class="panel-nav-item active" data-tab="api">API</div><div class="panel-nav-item" data-tab="prompts">预设</div><div class="panel-nav-item" data-tab="logs">日志</div><div class="panel-nav-item" data-tab="help">使用说明</div></div><div class="panel-content-wrapper"><div id="sg-panel-api" class="panel-content active"><div class="form-group"><label for="sg-api-key">API Key:</label><input type="password" id="sg-api-key"></div><div class="form-group"><label for="sg-base-url">Base URL:</label><input type="text" id="sg-base-url"></div><div class="form-group"><label for="sg-model">Model:</label><input type="text" id="sg-model"></div>${displayModeHtml}${sendModeHtml}</div><div id="sg-panel-prompts" class="panel-content"><div id="sg-prompt-list"></div><button id="sg-add-prompt-btn" class="sg-button secondary" style="width:100%;">添加新预设</button></div><div id="${LOG_PANEL_ID}" class="panel-content" data-tab-name="logs"></div><div id="sg-panel-help" class="panel-content">${helpContentHtml}</div></div></div>`);
             $overlay.append($panel).appendTo(parent$('body'));
             panelElement = $panel[0];
         }
@@ -444,13 +416,30 @@
         const $apiPanel = parent$('#sg-panel-api');
         $apiPanel.find('.update-notice').remove();
         if (settings.lastSeenScriptVersion !== SCRIPT_VERSION) {
-            const noticeHtml = `<div class="form-group update-notice" style="padding: 15px; border-radius: 8px; border: 1px solid var(--SmartThemeQuoteColor); background: rgba(74, 158, 255, 0.1);"><span style="color: var(--SmartThemeQuoteColor); font-weight: bold;">脚本已更新至 ${SCRIPT_VERSION} 版本。</span><br><br><span style="color: #dc3545; font-weight: bold;">重要说明：</span><br><span>请大家务必将预设提示词中的 <b style="background-color: #dc3545; padding: 2px 4px; border-radius: 3px;">{{user_last_reply}}</b> 和 <b style="background-color: #dc3545; padding: 2px 4px; border-radius: 3px;">{{ai_last_reply}}</b> 及前缀进行互换位置。因为聊天消息的上下文顺序是用户在前，AI消息在后，但之前版本的默认预设提示词写反了 o(╥﹏╥)o。</span><br><br><span>此外，实际发送的上下文可以直接在 <b style="color: var(--SmartThemeQuoteColor);">“日志”面板</b> 查看。<br><span style="font-size: 0.9em;">如果是新用户可不用在意，因为新版本已经将默认提示词的发送顺序改了回来，但安装过旧版本脚本更新后无法直接修正提示词的顺序。</span><br><span style="font-size: 0.8em;">（该更新信息在关闭UI后将不再显示）</span></span></div>`;
-            $apiPanel.find('#sg-display-mode-select').closest('.form-group').after(noticeHtml);
+            // 【修改】: 更新版本提示信息
+            const noticeHtml = `
+            <div class="form-group update-notice" style="padding: 15px; border-radius: 8px; border: 1px solid var(--SmartThemeQuoteColor); background: rgba(74, 158, 255, 0.1);">
+                <span style="color: var(--SmartThemeQuoteColor); font-weight: bold;">脚本已更新至 ${SCRIPT_VERSION} 版本。</span><br><br>
+                <p style="margin: 0 0 10px 0;">本次更新增加<b>“发送模式”</b>选项。共有两种模式：<b>自动发送</b>（点击后直接发送）与<b>手动发送</b>（点击后填入输入框），默认为自动发送。</p>
+                <p style="margin: 0 0 10px 0;"><b>推荐模型：</b>为获得最佳速度与效果，推荐使用 <code style="background: rgba(255,255,255,0.1); padding: 2px 5px; border-radius: 4px;">deepseek-chat</code> 或 <code style="background: rgba(255,255,255,0.1); padding: 2px 5px; border-radius: 4px;">gemini-1.5-flash-latest</code> 等高速模型。</p>
+                <div style="font-size: 0.9em;">
+                    <b style="color: var(--SmartThemeQuoteColor);">Gemini 用户参考:</b>
+                    <ul style="margin: 5px 0 0 20px; padding: 0; list-style-type: '➢ ';>
+                        <li><b>API Key 获取:</b> <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--SmartThemeBodyColor);">aistudio.google.com</a></li>
+                        <li><b>Base URL:</b> <code style="background: rgba(255,255,255,0.1); padding: 2px 5px; border-radius: 4px;">https://generativelanguage.googleapis.com/v1beta</code></li>
+                        <li><b>Model:</b> <code style="background: rgba(255,255,255,0.1); padding: 2px 5px; border-radius: 4px;">gemini-1.5-flash-latest</code></li>
+                    </ul>
+                </div>
+                <br>
+                <span style="font-size: 0.8em;">（该更新日志在关闭UI后将不再显示，直到下次更新）</span>
+            </div>`;
+            $apiPanel.prepend(noticeHtml);
         }
         parent$('#sg-api-key').val(settings.apiKey);
         parent$('#sg-base-url').val(settings.baseUrl);
         parent$('#sg-model').val(settings.model);
         parent$('#sg-display-mode-select').val(settings.displayMode);
+        parent$('#sg-send-mode-select').val(settings.sendMode); // 【新增】: 更新发送模式UI
         const $promptList = parent$('#sg-prompt-list').empty();
         settings.prompts.forEach((prompt, index) => {
             const $item = parent$(`<div class="prompt-item-container"><div class="prompt-item ${index === settings.activePromptIndex ? 'active' : ''}"><div class="prompt-item-name"><input type="text" class="prompt-name-input" value="${prompt.name}" data-index="${index}"></div><div class="prompt-item-actions"><button class="sg-button prompt-use-btn" data-index="${index}">使用</button><button class="sg-button danger prompt-delete-btn" data-index="${index}">删除</button></div></div><div class="form-group"><textarea class="prompt-content-textarea" data-index="${index}">${prompt.content}</textarea></div></div>`);
@@ -481,11 +470,13 @@
             parent$(`#${PANEL_ID} .panel-content`).removeClass('active');
             parent$(`#sg-panel-${tab}, [data-tab-name='${tab}']`).addClass('active');
         });
-        parentBody.on('change', '#sg-api-key, #sg-base-url, #sg-model, #sg-display-mode-select', async function () {
+        // 【修改】: 监听新增的发送模式选择框
+        parentBody.on('change', '#sg-api-key, #sg-base-url, #sg-model, #sg-display-mode-select, #sg-send-mode-select', async function () {
             settings.apiKey = parent$('#sg-api-key').val();
             settings.baseUrl = parent$('#sg-base-url').val();
             settings.model = parent$('#sg-model').val();
             settings.displayMode = parent$('#sg-display-mode-select').val();
+            settings.sendMode = parent$('#sg-send-mode-select').val(); // 【新增】: 保存发送模式设置
             await saveSettings();
         });
         parentBody.on('click', '#sg-add-prompt-btn', async () => {
